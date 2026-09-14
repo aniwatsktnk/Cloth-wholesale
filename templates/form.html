@@ -1,0 +1,1 @@
+{% extends 'base.html' %}{% block content %}<header><h1>{{ title|default:"เปลี่ยนรหัสผ่าน" }}</h1></header><section class="panel narrow"><form method="post">{% csrf_token %}{{ form.as_p }}<button>บันทึก</button> <a href="/">กลับภาพรวม</a></form></section>{% endblock %}

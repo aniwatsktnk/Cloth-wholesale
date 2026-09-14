@@ -1,0 +1,1 @@
+{% extends 'base.html' %}{% block content %}<section class="panel"><p class="eyebrow">CLOTH WHOLESALE</p><h1>เข้าสู่ระบบร้าน</h1><p>สินค้า สต๊อก และใบเสร็จในที่เดียว</p><form method="post">{% csrf_token %}{{ form.as_p }}<button>เข้าสู่ระบบ</button></form></section>{% endblock %}
