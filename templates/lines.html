@@ -1,0 +1,1 @@
+<div class="scroll"><table><tr><th>รายการ</th><th>จำนวน</th><th>ราคา</th><th class="num">รวม</th></tr>{% for l in bill.lines.all %}<tr><td>{{ l.description }}</td><td>{{ l.quantity }}</td><td>{{ l.price }}</td><td class="num">{{ l.amount }}</td></tr>{% endfor %}</table></div>

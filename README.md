@@ -1,5 +1,77 @@
 # Cloth Wholesale
+ระบบบริหารร้านขายส่งเสื้อผ้าออนไลน์ ภาษาไทย ใช้ฐานข้อมูลกลางร่วมกันหลายเครื่อง
+สร้างใหม่ด้วย Django + PostgreSQL ไม่พึ่งพา Higgsfield
 
-Independent online wholesale clothing management application. No Higgsfield dependency.
+## สถานะ
+โค้ดรุ่นแรกสำหรับติดตั้งและทดสอบ ยังไม่ได้เปิดเว็บไซต์ออนไลน์
+ตรวจผลการทดสอบใน GitHub Actions ก่อนใช้ข้อมูลร้านจริง
+GitHub repository นี้เป็น public ห้ามใส่รหัสผ่าน ข้อมูลลูกค้า หรือสำรองฐานข้อมูลลง Git
 
-Implementation in progress. Not yet deployed or validated for live transactions.
+## ฟังก์ชัน
+- ล็อกอินและกลุ่มฝ่ายขาย / สต๊อก / ผู้จัดการ กำหนดผู้ใช้ผ่าน Django Admin
+- เพิ่มสินค้า SKU แยกรุ่น สี ไซซ์ ราคาปลีกและราคาส่ง
+- ราคาส่งเมื่อซื้อรวม 6 ตัวต่อรุ่น คละสีและไซซ์ได้ (ราคาแต่ละ SKU ตั้งต่างกันได้)
+- รับและปรับสต๊อกพร้อมเหตุผล ประวัติผู้บันทึก
+- เพิ่มลูกค้า เปิดบิล ส่วนลด รับเงินเต็ม/บางส่วน/เครดิต
+- PostgreSQL transaction และ row locking ป้องกันสต๊อกติดลบจากการขายพร้อมกัน
+- Request key ป้องกันการสร้างบิลและรับเงินซ้ำจาก retry
+- ออกใบเสร็จเฉพาะยอดรับเงินจริง เก็บข้อมูลสินค้า/ร้าน ณ เวลาเปิดบิล
+- พิมพ์ซ้ำ A4 / 80 มม. และใช้คำสั่ง Save as PDF ของเบราว์เซอร์
+- ยกเลิกใบเสร็จเก็บเหตุผล เปิดยอดค้างอีกครั้ง ไม่ลบประวัติ
+- ยกเลิกบิลคืนสต๊อกได้หลังจัดการใบเสร็จและคืนเงินจริงแล้ว
+- Dashboard ยอดขายและยอดค้างจากฐานข้อมูลจริง เวลา Asia/Bangkok
+
+## ติดตั้งบน Railway
+1. สร้าง Project ใหม่จาก GitHub repo นี้ และเพิ่ม PostgreSQL ใน Project เดียวกัน
+2. ตั้งตัวแปรใน web service:
+   - SECRET_KEY: สุ่มอย่างน้อย 50 ตัวอักษร ห้ามใช้ค่าตัวอย่าง
+   - DATABASE_URL: reference URL ของ PostgreSQL ใน Project
+   - DEBUG=false
+   - ALLOWED_HOSTS: hostname ที่ Railway สร้างให้ ไม่ใส่ https://
+   - CSRF_TRUSTED_ORIGINS: https:// ตามด้วย hostname เดียวกัน
+3. Generate Domain แล้ว Deploy (Dockerfile และ start.sh อยู่ใน repo แล้ว)
+4. เปิด shell ของ service แล้วรัน python manage.py createsuperuser ตั้งรหัสผ่านส่วนตัว
+5. ล็อกอิน /admin/ ด้วยบัญชีเจ้าของร้าน เพิ่มพนักงานใน Users และเลือก Group ที่ต้องการ
+6. ตั้งชื่อ/ที่อยู่/เลขผู้เสียภาษีร้านที่ /settings/ ก่อนออกบิลจริง
+7. เพิ่ม SKU รับสต๊อก แล้วทดลองเปิดบิล รับเงิน พิมพ์ใบเสร็จ และยกเลิกด้วยข้อมูลทดสอบ
+8. ตั้ง backup PostgreSQL ตามโฮสต์ และทดสอบการกู้คืนก่อนใช้จริง
+
+การเปิดโฮสต์และฐานข้อมูลอาจมีค่าบริการตามผู้ให้บริการ ผู้ใช้ต้องเลือกแพ็กเกจเอง
+การ migrate เกิดตอนเริ่ม service: สำหรับรุ่นแรกให้มี web replica เดียว
+ไม่ตั้งค่า production ให้ใช้ SQLite เพราะไม่รองรับ row-lock workflow นี้
+
+## พัฒนาในเครื่อง
+Python 3.12:
+```sh
+python -m venv .venv
+# activate virtual environment ตามระบบปฏิบัติการ
+pip install -r requirements.txt
+# ตั้ง SECRET_KEY เป็นค่าสุ่ม และ DEBUG=true ใน environment
+python manage.py migrate
+python manage.py setup_roles
+python manage.py createsuperuser
+python manage.py runserver
+```
+SQLite ใช้ทดลองเดี่ยวได้ แต่ทดสอบการขายพร้อมกันต้องใช้ PostgreSQL
+
+## ตรวจสอบ
+```sh
+python manage.py makemigrations --check --dry-run
+python manage.py check
+python manage.py test
+python manage.py check --deploy
+```
+CI ใช้ PostgreSQL ทดสอบราคาส่งคละไซซ์, ป้องกันขายเกินสต๊อก,
+รับเงินบางส่วน, retry, ยกเลิกและคืนสต๊อก, การคงข้อมูลเอกสาร, สิทธิ์และหน้าจอ
+ตรวจ build logs และทดลองพิมพ์กับเครื่องจริงก่อนเปิดใช้ร้าน
+
+## ขอบเขตรุ่นแรก
+- ใบเสร็จธรรมดาเท่านั้น ยังไม่มี VAT / ใบกำกับภาษี / e-Tax Invoice
+- บันทึกวิธีรับเงินด้วยมือ ไม่มีการตรวจยอดธนาคารหรือเชื่อม payment gateway
+- การยกเลิกเอกสารไม่ได้สั่งคืนเงินจริง
+- พนักงานที่ล็อกอินเห็นยอดขายและข้อมูลลูกค้า ต้นทุนแสดงเฉพาะหน้า Admin
+- ผู้ดูแลจัดการสินค้า/ลูกค้าเดิมผ่าน Admin; หน้าใช้งานหลักรองรับเพิ่มรายการ
+- 1 ร้าน 1 สต๊อก ยังไม่มีหลายคลัง จัดซื้อ Supplier ขนส่ง การคืนสินค้าบางส่วน หรือราคาส่งมากกว่า 2 ระดับ
+- เลขเอกสารเป็นเลขรัน SO/RC ไม่รีเซ็ตรายเดือน และอาจมีช่องว่างเลขเมื่อธุรกรรมล้มเหลว
+- ไม่มีบัญชีหรือรหัสผ่านเริ่มต้น ต้องสร้างเจ้าของร้านเอง
+- ยังไม่มีการทดสอบ UI ด้วยเบราว์เซอร์หรือเครื่องพิมพ์จริงในเซสชันนี้

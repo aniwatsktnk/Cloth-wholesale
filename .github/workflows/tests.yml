@@ -1,0 +1,41 @@
+name: Application tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: wholesale
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      SECRET_KEY: ci-only-not-a-production-secret-change-this-before-deployment-1234
+      DEBUG: "true"
+      DATABASE_URL: postgres://test:test@localhost:5432/wholesale
+      ALLOWED_HOSTS: localhost,testserver
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python manage.py makemigrations --check --dry-run
+      - run: python manage.py check
+      - run: python manage.py collectstatic --noinput
+      - run: python manage.py test --verbosity 2
+      - name: Production settings check
+        run: python manage.py check --deploy --fail-level WARNING
+        env:
+          DEBUG: "false"
+          ALLOWED_HOSTS: wholesale.example.com
+          CSRF_TRUSTED_ORIGINS: https://wholesale.example.com
