@@ -2,6 +2,8 @@ from collections import Counter
 from decimal import Decimal
 from django.db import transaction
 from django.core.exceptions import ValidationError
+from django.utils import timezone
+from datetime import timedelta
 from .models import Bill,Line,Payment,Product,Movement,ShopSettings
 
 def amount(value):
@@ -12,7 +14,7 @@ def amount(value):
     return d
 
 @transaction.atomic
-def sell(*,user,key,items,customer,discount,paid,method,reference=""):
+def sell(*,user,key,items,customer,discount,paid,method,reference="",due_date=None):
     # Serializing this shop's bills also makes request retries idempotent.
     shop=ShopSettings.objects.select_for_update().first()
     if not shop or not shop.name or not shop.address:
@@ -24,27 +26,40 @@ def sell(*,user,key,items,customer,discount,paid,method,reference=""):
         if not isinstance(qty,int) or qty<1 or qty>10000: raise ValidationError("จำนวนสินค้าไม่ถูกต้อง")
         counts[int(pid)]+=qty
     if not counts or len(counts)>100: raise ValidationError("เลือกสินค้า 1 ถึง 100 รายการ")
-    products=list(Product.objects.select_for_update().filter(pk__in=counts,active=True).order_by("pk"))
+    products=list(Product.objects.select_for_update().filter(pk__in=counts,active=True).prefetch_related("price_tiers","customer_prices").order_by("pk"))
     if len(products)!=len(counts): raise ValidationError("ไม่พบสินค้าหรือสินค้าปิดขาย")
     styles=Counter()
     for p in products:
         if p.stock<counts[p.pk]: raise ValidationError(f"สต๊อก {p.sku} ไม่พอ")
         styles[p.style]+=counts[p.pk]
-    rows=[(p,counts[p.pk],p.wholesale if styles[p.style]>=6 else p.retail) for p in products]
+    rows=[(p,counts[p.pk],unit_price(p,styles[p.style],customer.pk if customer else None)) for p in products]
     subtotal=sum((q*price for p,q,price in rows),Decimal("0"))
     discount,paid=amount(discount),amount(paid)
     if discount>subtotal: raise ValidationError("ส่วนลดเกินยอดสินค้า")
     total=subtotal-discount
     if paid>total: raise ValidationError("ยอดรับเงินเกินยอดสุทธิ")
     if paid<total and not customer: raise ValidationError("กรุณาเลือกลูกค้าสำหรับยอดค้างชำระ")
+    if due_date and due_date<timezone.localdate(): raise ValidationError("วันครบกำหนดบิลใหม่ต้องไม่ก่อนวันนี้")
+    if customer and due_date is None:
+        due_date=timezone.localdate()+timedelta(days=customer.credit_days)
     if method not in dict(Payment.METHODS): raise ValidationError("วิธีชำระไม่ถูกต้อง")
     bill=Bill.objects.create(request_key=key,customer=customer,buyer={"name":customer.name,"address":customer.address,"tax_id":customer.tax_id} if customer else {"name":"ลูกค้าหน้าร้าน"},seller=shop.snapshot(),total=total,discount=discount,creator=user)
+    bill.due_date=due_date;bill.save(update_fields=["due_date"])
     for p,q,price in rows:
         Line.objects.create(bill=bill,product=p,description=str(p),quantity=q,price=price,cost=p.cost)
         p.stock-=q;p.save(update_fields=["stock"])
         Movement.objects.create(product=p,delta=-q,reason=bill.number,creator=user)
     if paid: Payment.objects.create(bill=bill,amount=paid,method=method,reference=reference,creator=user,balance_after=total-paid)
     return bill
+
+def unit_price(product,quantity,customer_id=None):
+    # A negotiated customer price is fixed regardless of quantity.
+    for special in product.customer_prices.all():
+        if special.customer_id==customer_id: return special.price
+    # Explicit levels replace the same threshold; legacy 6+ price stays available.
+    levels={1:product.retail,6:product.wholesale}
+    levels.update({t.minimum_quantity:t.price for t in product.price_tiers.all()})
+    return levels[max(n for n in levels if n<=quantity)]
 
 @transaction.atomic
 def receive(*,user,bill_id,key,value,method,reference):

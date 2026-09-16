@@ -22,7 +22,7 @@ jobs:
       SECRET_KEY: ci-only-not-a-production-secret-change-this-before-deployment-1234
       DEBUG: "true"
       DATABASE_URL: postgres://test:test@localhost:5432/wholesale
-      ALLOWED_HOSTS: localhost,testserver
+      ALLOWED_HOSTS: localhost,127.0.0.1,testserver
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -39,3 +39,9 @@ jobs:
           DEBUG: "false"
           ALLOWED_HOSTS: wholesale.example.com
           CSRF_TRUSTED_ORIGINS: https://wholesale.example.com
+      - name: Install browser test tools
+        run: |
+          pip install 'playwright>=1.50,<2'
+          playwright install --with-deps chromium
+      - name: Browser sales workflow
+        run: python manage.py test shop.browser_checks --verbosity 2

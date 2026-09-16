@@ -16,6 +16,7 @@ class Product(models.Model):
     stock=models.PositiveIntegerField(default=0)
     minimum=models.PositiveIntegerField("จุดเตือนสต๊อก",default=5)
     active=models.BooleanField("เปิดขาย",default=True)
+    image_url=models.URLField("ลิงก์รูปสินค้า (HTTPS)",max_length=1000,blank=True)
     class Meta:
         ordering=["style","color","size"]
         permissions=[("adjust_stock","Can receive or adjust inventory")]
@@ -25,11 +26,13 @@ class Customer(models.Model):
     phone=models.CharField("โทรศัพท์",max_length=30,blank=True)
     address=models.TextField("ที่อยู่",blank=True,max_length=1000)
     tax_id=models.CharField("เลขประจำตัวผู้เสียภาษี",max_length=20,blank=True)
+    credit_days=models.PositiveSmallIntegerField("เครดิต (วัน)",default=0)
     class Meta: ordering=["name"]
     def __str__(self): return self.name
 class Bill(models.Model):
     request_key=models.UUIDField(default=uuid.uuid4,unique=True,editable=False)
     created=models.DateTimeField(auto_now_add=True)
+    due_date=models.DateField("ครบกำหนดชำระ",null=True,blank=True)
     customer=models.ForeignKey(Customer,on_delete=models.PROTECT,null=True,blank=True)
     buyer=models.JSONField(default=dict)
     seller=models.JSONField(default=dict)
@@ -81,3 +84,26 @@ class ShopSettings(models.Model):
     tax_id=models.CharField("เลขผู้เสียภาษี (ถ้ามี)",max_length=20,blank=True)
     phone=models.CharField("โทรศัพท์",max_length=30,blank=True)
     def snapshot(self): return {k:getattr(self,k) for k in ["name","address","tax_id","phone"]}
+
+class PriceTier(models.Model):
+    product=models.ForeignKey(Product,on_delete=models.CASCADE,related_name="price_tiers")
+    minimum_quantity=models.PositiveIntegerField("จำนวนรวมต่อรุ่นตั้งแต่",validators=[MinValueValidator(1)])
+    price=models.DecimalField("ราคาต่อหน่วย",max_digits=12,decimal_places=2,validators=NONNEG)
+    class Meta:
+        ordering=["minimum_quantity"]
+        constraints=[models.UniqueConstraint(fields=["product","minimum_quantity"],name="unique_product_tier")]
+
+class CustomerPrice(models.Model):
+    product=models.ForeignKey(Product,on_delete=models.CASCADE,related_name="customer_prices")
+    customer=models.ForeignKey(Customer,on_delete=models.CASCADE,related_name="special_prices")
+    price=models.DecimalField("ราคาเฉพาะลูกค้าต่อหน่วย",max_digits=12,decimal_places=2,validators=NONNEG)
+    class Meta:
+        constraints=[models.UniqueConstraint(fields=["product","customer"],name="unique_customer_product_price")]
+
+class AuditEvent(models.Model):
+    created=models.DateTimeField(auto_now_add=True)
+    actor=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.PROTECT)
+    object_type=models.CharField(max_length=40)
+    object_id=models.PositiveBigIntegerField()
+    changes=models.JSONField(default=dict)
+    class Meta: ordering=["-created","-pk"]

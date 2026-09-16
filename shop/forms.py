@@ -1,11 +1,17 @@
 from django import forms
-from .models import Product,Customer,Payment,ShopSettings
+from .models import Product,Customer,Payment,ShopSettings,PriceTier,CustomerPrice
 class ProductForm(forms.ModelForm):
     class Meta:
         model=Product
-        fields=["sku","style","name","color","size","retail","wholesale","minimum","active"]
+        fields=["sku","style","name","color","size","image_url","retail","wholesale","minimum","active"]
+    def clean_image_url(self):
+        value=self.cleaned_data["image_url"]
+        if value and not value.startswith("https://"):
+            raise forms.ValidationError("ใช้ลิงก์รูปภาพที่ขึ้นต้นด้วย https://")
+        return value
 class CustomerForm(forms.ModelForm):
-    class Meta: model=Customer;fields=["name","phone","address","tax_id"]
+    credit_days=forms.IntegerField(label="เครดิต (วัน)",min_value=0,max_value=365,initial=0)
+    class Meta: model=Customer;fields=["name","phone","address","tax_id","credit_days"]
 class SettingsForm(forms.ModelForm):
     class Meta: model=ShopSettings;fields=["name","address","tax_id","phone"]
 class SaleForm(forms.Form):
@@ -15,6 +21,7 @@ class SaleForm(forms.Form):
     paid=forms.DecimalField(label="ยอดที่รับเงินจริงครั้งนี้",min_value=0,decimal_places=2,max_digits=12,initial=0)
     method=forms.ChoiceField(label="วิธีรับเงิน",choices=Payment.METHODS)
     reference=forms.CharField(label="เลขอ้างอิงการชำระ",max_length=160,required=False)
+    due_date=forms.DateField(label="ครบกำหนดชำระ (เว้นว่างเพื่อใช้เครดิตลูกค้า)",required=False,widget=forms.DateInput(attrs={"type":"date"}))
 class ItemForm(forms.Form):
     product=forms.ModelChoiceField(label="สินค้า",queryset=Product.objects.filter(active=True))
     quantity=forms.IntegerField(label="จำนวน",min_value=1,max_value=10000)
@@ -30,3 +37,10 @@ class StockForm(forms.Form):
     reason=forms.CharField(label="เหตุผล / เลขที่รับสินค้า",max_length=250)
 class ReasonForm(forms.Form):
     reason=forms.CharField(label="เหตุผล (การคืนเงินต้องดำเนินการจริงแยกจากระบบ)",max_length=500,widget=forms.Textarea)
+
+Tiers=forms.inlineformset_factory(Product,PriceTier,fields=["minimum_quantity","price"],extra=1,can_delete=True,max_num=20,validate_max=True)
+SpecialPrices=forms.inlineformset_factory(Product,CustomerPrice,fields=["customer","price"],extra=1,can_delete=True,max_num=200,validate_max=True)
+
+class DueDateForm(forms.Form):
+    due_date=forms.DateField(label="วันครบกำหนดใหม่",widget=forms.DateInput(attrs={"type":"date"}))
+    reason=forms.CharField(label="เหตุผลที่แก้ไข",max_length=300)
