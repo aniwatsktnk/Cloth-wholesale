@@ -5,10 +5,12 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required,permission_required
 from django.core.exceptions import ValidationError
 from django.db.models import Sum,F,Q
+from django.db import transaction
+from django.core.paginator import Paginator
 from django.shortcuts import render,redirect,get_object_or_404
 from django.utils import timezone
-from .models import Product,Customer,Bill,Payment,Movement,ShopSettings
-from .forms import ProductForm,CustomerForm,SettingsForm,SaleForm,Items,ReceiveForm,StockForm,ReasonForm
+from .models import Product,Customer,Bill,Payment,Movement,ShopSettings,AuditEvent
+from .forms import ProductForm,CustomerForm,SettingsForm,SaleForm,Items,ReceiveForm,StockForm,ReasonForm,Tiers,SpecialPrices,DueDateForm
 from .services import sell,receive,adjust,void_bill,void_payment
 
 def errors(form,exc): form.add_error(None,"; ".join(exc.messages))
@@ -34,7 +36,8 @@ def product_add(request):
     return render(request,"form.html",{"form":form,"title":"เพิ่มสินค้าแยกสีและไซซ์"})
 @login_required
 def customers(request):
-    return render(request,"customers.html",{"items":Customer.objects.all()})
+    q=request.GET.get("q","")
+    return render(request,"customers.html",{"items":Customer.objects.filter(Q(name__icontains=q)|Q(phone__icontains=q)),"q":q})
 @permission_required("shop.add_customer",raise_exception=True)
 def customer_add(request):
     form=CustomerForm(request.POST or None)
@@ -55,7 +58,10 @@ def sale_new(request):
             b=sell(user=request.user,items=lines,**form.cleaned_data)
             return redirect("bill",pk=b.pk)
         except ValidationError as e: errors(form,e)
-    catalog={str(p.pk):{"style":p.style,"retail":str(p.retail),"wholesale":str(p.wholesale),"stock":p.stock} for p in Product.objects.filter(active=True)}
+    catalog={str(p.pk):{"sku":p.sku,"name":p.name,"color":p.color,"size":p.size,"style":p.style,"retail":str(p.retail),"wholesale":str(p.wholesale),"stock":p.stock,
+        "tiers":{str(t.minimum_quantity):str(t.price) for t in p.price_tiers.all()},
+        "special":{str(c.customer_id):str(c.price) for c in p.customer_prices.all()}}
+        for p in Product.objects.filter(active=True).prefetch_related("price_tiers","customer_prices")}
     return render(request,"sale.html",{"form":form,"items":items,"catalog":catalog})
 @login_required
 def bills(request):
@@ -108,3 +114,81 @@ def cancel_payment(request,pk):
             return redirect("receipt",pk=pk)
         except ValidationError as e: errors(form,e)
     return render(request,"form.html",{"form":form,"title":"ยกเลิกใบเสร็จ (ไม่ลบประวัติ)"})
+
+def audit(user,obj,before,after):
+    changes={k:{"before":before.get(k),"after":v} for k,v in after.items() if before.get(k)!=v}
+    if changes: AuditEvent.objects.create(actor=user,object_type=obj._meta.model_name,object_id=obj.pk,changes=changes)
+
+def snapshot(obj,fields): return {k:str(getattr(obj,k)) for k in fields}
+
+@permission_required("shop.change_product",raise_exception=True)
+@transaction.atomic
+def product_edit(request,pk):
+    product=get_object_or_404(Product.objects.select_for_update(),pk=pk)
+    before=snapshot(product,ProductForm.Meta.fields)
+    form=ProductForm(request.POST or None,instance=product)
+    if request.method=="POST" and form.is_valid():
+        form.save();audit(request.user,product,before,snapshot(product,ProductForm.Meta.fields))
+        messages.success(request,"บันทึกสินค้าแล้ว");return redirect("products")
+    return render(request,"form.html",{"form":form,"title":f"แก้ไขสินค้า {product.sku}"})
+
+@permission_required("shop.change_customer",raise_exception=True)
+@transaction.atomic
+def customer_edit(request,pk):
+    customer=get_object_or_404(Customer.objects.select_for_update(),pk=pk)
+    before=snapshot(customer,CustomerForm.Meta.fields)
+    form=CustomerForm(request.POST or None,instance=customer)
+    if request.method=="POST" and form.is_valid():
+        form.save();audit(request.user,customer,before,snapshot(customer,CustomerForm.Meta.fields))
+        messages.success(request,"บันทึกลูกค้าแล้ว บิลเดิมยังคงข้อมูลเดิม");return redirect("customers")
+    return render(request,"form.html",{"form":form,"title":f"แก้ไขลูกค้า {customer.name}"})
+
+@permission_required("shop.change_product",raise_exception=True)
+@transaction.atomic
+def product_prices(request,pk):
+    product=get_object_or_404(Product.objects.select_for_update(),pk=pk)
+    def prices():
+        return {"tiers":list(product.price_tiers.values_list("minimum_quantity","price")),"special":list(product.customer_prices.values_list("customer_id","price"))}
+    before={k:str(v) for k,v in prices().items()}
+    tiers=Tiers(request.POST or None,instance=product,prefix="tiers")
+    specials=SpecialPrices(request.POST or None,instance=product,prefix="specials")
+    if request.method=="POST":
+        valid_tiers=tiers.is_valid();valid_specials=specials.is_valid()
+        if valid_tiers and valid_specials:
+            tiers.save();specials.save()
+            audit(request.user,product,before,{k:str(v) for k,v in prices().items()})
+            messages.success(request,"บันทึกราคาแล้ว ใช้กับบิลใหม่เท่านั้น");return redirect("product_prices",pk=pk)
+    return render(request,"prices.html",{"product":product,"tiers":tiers,"specials":specials})
+
+@login_required
+def receivables(request):
+    today=timezone.localdate();customer_id=request.GET.get("customer","");bucket=request.GET.get("bucket","")
+    qs=Bill.objects.filter(status="open").select_related("customer").prefetch_related("payments").order_by("due_date","pk")
+    if customer_id.isdigit(): qs=qs.filter(customer_id=int(customer_id))
+    totals={k:Decimal("0") for k in ["all","not_due","1_30","31_60","over_60","unknown"]}
+    rows=[];groups={}
+    for b in qs:
+        balance=b.balance
+        if balance<=0: continue
+        days=(today-b.due_date).days if b.due_date else None
+        category="unknown" if days is None else "not_due" if days<=0 else "1_30" if days<=30 else "31_60" if days<=60 else "over_60"
+        totals[category]+=balance;totals["all"]+=balance
+        group=groups.setdefault(b.customer_id,{"customer":b.customer,"balance":Decimal("0"),"overdue":Decimal("0")})
+        group["balance"]+=balance
+        if days is not None and days>0: group["overdue"]+=balance
+        if not bucket or category==bucket: rows.append({"bill":b,"balance":balance,"days":days,"overdue":days is not None and days>0})
+    page=Paginator(rows,50).get_page(request.GET.get("page"))
+    return render(request,"receivables.html",{"page":page,"totals":totals,"groups":groups.values(),"customers":Customer.objects.all(),"customer_id":customer_id,"bucket":bucket,"today":today})
+
+@permission_required("shop.change_bill",raise_exception=True)
+@transaction.atomic
+def due_date_edit(request,pk):
+    bill=get_object_or_404(Bill.objects.select_for_update(),pk=pk)
+    form=DueDateForm(request.POST or None,initial={"due_date":bill.due_date})
+    if request.method=="POST" and form.is_valid():
+        if bill.status=="void": form.add_error(None,"แก้วันครบกำหนดบิลที่ยกเลิกแล้วไม่ได้")
+        else:
+            old=str(bill.due_date);bill.due_date=form.cleaned_data["due_date"];bill.save(update_fields=["due_date"])
+            audit(request.user,bill,{"due_date":old},{"due_date":str(bill.due_date),"reason":form.cleaned_data["reason"]})
+            messages.success(request,"บันทึกวันครบกำหนดแล้ว");return redirect("bill",pk=pk)
+    return render(request,"form.html",{"form":form,"title":f"วันครบกำหนด {bill.number}"})

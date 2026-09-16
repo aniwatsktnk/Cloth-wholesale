@@ -1,6 +1,11 @@
 from django.urls import path
 from . import views as v
 urlpatterns=[
+ path("products/<int:pk>/edit/",v.product_edit,name="product_edit"),
+ path("products/<int:pk>/prices/",v.product_prices,name="product_prices"),
+ path("customers/<int:pk>/edit/",v.customer_edit,name="customer_edit"),
+ path("receivables/",v.receivables,name="receivables"),
+ path("sales/<int:pk>/due-date/",v.due_date_edit,name="due_date_edit"),
  path("",v.dashboard,name="home"),
  path("products/",v.products,name="products"),path("products/add/",v.product_add,name="product_add"),
  path("customers/",v.customers,name="customers"),path("customers/add/",v.customer_add,name="customer_add"),
