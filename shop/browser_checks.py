@@ -1,10 +1,12 @@
 """Browser checks run explicitly by CI, against disposable test data only."""
 from django.contrib.staticfiles.testing import StaticLiveServerTestCase
+from django.test import override_settings
 from django.contrib.auth import get_user_model
 from playwright.sync_api import sync_playwright
 from .models import Product, Customer, PriceTier, CustomerPrice, ShopSettings
 
 
+@override_settings(STORAGES={"default":{"BACKEND":"django.core.files.storage.FileSystemStorage"},"staticfiles":{"BACKEND":"django.contrib.staticfiles.storage.StaticFilesStorage"}})
 class WholesaleBrowserChecks(StaticLiveServerTestCase):
     def test_matrix_prices_checkout_and_mobile(self):
         get_user_model().objects.create_superuser('browser-owner',password='Local-Browser-Check-843!')
