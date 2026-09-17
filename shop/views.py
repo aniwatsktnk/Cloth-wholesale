@@ -192,3 +192,75 @@ def due_date_edit(request,pk):
             audit(request.user,bill,{"due_date":old},{"due_date":str(bill.due_date),"reason":form.cleaned_data["reason"]})
             messages.success(request,"บันทึกวันครบกำหนดแล้ว");return redirect("bill",pk=pk)
     return render(request,"form.html",{"form":form,"title":f"วันครบกำหนด {bill.number}"})
+
+@login_required
+def receipt_list(request):
+    from .forms import ReceiptFilterForm,BundleForm
+    from .models import ReceiptBundle
+    from .services import combine_receipts
+    filters=ReceiptFilterForm(request.GET)
+    qs=Payment.objects.select_related('bill','creator').order_by('-pk')
+    if filters.is_valid():
+        data=filters.cleaned_data
+        if data.get('customer'): qs=qs.filter(bill__customer=data['customer'])
+        if data.get('start'): qs=qs.filter(created__date__gte=data['start'])
+        if data.get('end'): qs=qs.filter(created__date__lte=data['end'])
+        if data.get('q'):
+            q=data['q'].strip();number=q.split('-')[-1]
+            if number.isdigit() and len(number)>18:
+                qs=qs.none()
+            elif number.isdigit():
+                qs=qs.filter(bill_id=int(number)) if q.upper().startswith('SO-') else qs.filter(pk=int(number))
+            else: qs=qs.filter(bill__buyer__name__icontains=q)
+    else: qs=qs.none()
+    form=BundleForm(request.POST or None,initial={'key':uuid.uuid4()})
+    if request.method=='POST':
+        if not request.user.has_perm('shop.add_receiptbundle'):
+            from django.core.exceptions import PermissionDenied
+            raise PermissionDenied
+        if form.is_valid():
+            try:
+                bundle=combine_receipts(user=request.user,key=form.cleaned_data['key'],payment_ids=list(form.cleaned_data['payments'].values_list('pk',flat=True)))
+                return redirect('receipt_bundle',pk=bundle.pk)
+            except ValidationError as e: errors(form,e)
+    page=Paginator(qs,100).get_page(request.GET.get('page'))
+    params=request.GET.copy();params.pop('page',None)
+    return render(request,'receipt_list.html',{'page':page,'filters':filters,'form':form,'query':params.urlencode(),
+        'selected':request.POST.getlist('payments'),'bundles':ReceiptBundle.objects.select_related('customer').order_by('-pk')[:30]})
+
+@login_required
+def receipt_bundle(request,pk):
+    from .models import ReceiptBundle
+    bundle=get_object_or_404(ReceiptBundle.objects.select_related('creator'),pk=pk)
+    return render(request,'receipt_bundle.html',{'bundle':bundle,'data':bundle.snapshot,'invalid':bundle.invalid,'thermal':request.GET.get('paper')=='80'})
+
+@permission_required('shop.change_receiptbundle',raise_exception=True)
+@transaction.atomic
+def cancel_bundle(request,pk):
+    from .models import ReceiptBundle
+    bundle=get_object_or_404(ReceiptBundle.objects.select_for_update(),pk=pk)
+    form=ReasonForm(request.POST or None)
+    form.fields['reason'].label='เหตุผลยกเลิกใบสรุป (ไม่กระทบใบเสร็จต้นฉบับ)'
+    if request.method=='POST' and form.is_valid():
+        if not bundle.cancelled:
+            bundle.cancelled=True;bundle.cancel_reason=f'{request.user.username}: {form.cleaned_data["reason"]}'[:500]
+            bundle.save(update_fields=['cancelled','cancel_reason'])
+            audit(request.user,bundle,{'cancelled':False},{'cancelled':True,'reason':bundle.cancel_reason})
+        return redirect('receipt_bundle',pk=pk)
+    return render(request,'form.html',{'form':form,'title':f'ยกเลิกใบสรุป {bundle.number}'})
+
+@login_required
+def money_report(request):
+    from .forms import MoneyReportForm
+    from django.db.models.functions import TruncDate
+    from django.db.models import Count
+    today=timezone.localdate()
+    form=MoneyReportForm(request.GET or {'start':today.isoformat(),'end':today.isoformat()})
+    payments=Payment.objects.none()
+    if form.is_valid(): payments=Payment.objects.filter(created__date__range=(form.cleaned_data['start'],form.cleaned_data['end']))
+    valid=payments.filter(voided=False)
+    method_totals={r['method']:r for r in valid.values('method').annotate(total=Sum('amount'),count=Count('pk'))}
+    methods=[{'name':label,'total':method_totals.get(key,{}).get('total',0),'count':method_totals.get(key,{}).get('count',0)} for key,label in Payment.METHODS]
+    days=valid.annotate(day=TruncDate('created')).values('day').annotate(total=Sum('amount'),count=Count('pk')).order_by('-day')
+    return render(request,'money_report.html',{'form':form,'methods':methods,'days':days,
+        'total':valid.aggregate(value=Sum('amount'))['value'] or 0,'count':valid.count(),'void_count':payments.filter(voided=True).count()})

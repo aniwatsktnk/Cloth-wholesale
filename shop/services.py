@@ -104,3 +104,34 @@ def void_bill(*,user,bill_id,reason):
         p=products[line.product_id];p.stock+=line.quantity;p.save(update_fields=["stock"])
         Movement.objects.create(product=p,delta=line.quantity,reason=f"ยกเลิก {bill.number}: {reason}"[:300],creator=user)
     bill.status="void";bill.void_reason=f"{user.username}: {reason}";bill.save(update_fields=["status","void_reason"])
+
+@transaction.atomic
+def combine_receipts(*,user,key,payment_ids):
+    from .models import ReceiptBundle
+    shop=ShopSettings.objects.select_for_update().first()
+    if not shop: raise ValidationError('กรุณาตั้งค่าร้านก่อน')
+    old=ReceiptBundle.objects.filter(request_key=key).first()
+    if old: return old
+    ids=list(set(payment_ids))
+    if not 2<=len(ids)<=100: raise ValidationError('เลือกใบเสร็จ 2–100 ใบ')
+    # Use the same bill locks as payment cancellation, so snapshots are consistent.
+    bill_ids=list(Payment.objects.filter(pk__in=ids).values_list('bill_id',flat=True))
+    list(Bill.objects.select_for_update().filter(pk__in=bill_ids).order_by('pk'))
+    payments=list(Payment.objects.filter(pk__in=ids).select_related('bill','creator').order_by('pk'))
+    if len(payments)!=len(ids) or any(p.voided or p.bill.status=='void' for p in payments):
+        raise ValidationError('มีใบเสร็จที่ไม่พบหรือยกเลิกแล้ว กรุณาเลือกใหม่')
+    first=payments[0].bill
+    if first.customer_id is None or any(p.bill.customer_id!=first.customer_id for p in payments):
+        raise ValidationError('รวมได้เฉพาะใบเสร็จของลูกค้าที่ระบุชื่อรายเดียวกัน ไม่รวมลูกค้าหน้าร้านที่ไม่ระบุตัวตน')
+    if any(p.bill.buyer!=first.buyer or p.bill.seller!=first.seller for p in payments):
+        raise ValidationError('ข้อมูลผู้ซื้อหรือร้านในใบเสร็จต้นฉบับต่างกัน กรุณาแยกเอกสารสรุป')
+    bills=[]
+    for bill in Bill.objects.filter(pk__in=set(bill_ids)).prefetch_related('lines').order_by('pk'):
+        bills.append({'id':bill.pk,'number':bill.number,'total':str(bill.total),'discount':str(bill.discount),
+            'lines':[{'description':line.description,'quantity':line.quantity,'price':str(line.price),'amount':str(line.amount)} for line in bill.lines.all()]})
+    snapshot={'buyer':first.buyer,'seller':first.seller,'bills':bills,
+        'payments':[{'id':p.pk,'number':p.number,'bill_number':p.bill.number,'date':timezone.localtime(p.created).strftime('%d/%m/%Y %H:%M'),
+                     'amount':str(p.amount),'method':p.get_method_display(),'reference':p.reference} for p in payments]}
+    bundle=ReceiptBundle.objects.create(request_key=key,creator=user,customer_id=first.customer_id,snapshot=snapshot,total=sum((p.amount for p in payments),Decimal('0')))
+    bundle.payments.set(payments)
+    return bundle

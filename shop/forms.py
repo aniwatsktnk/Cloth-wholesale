@@ -44,3 +44,27 @@ SpecialPrices=forms.inlineformset_factory(Product,CustomerPrice,fields=["custome
 class DueDateForm(forms.Form):
     due_date=forms.DateField(label="วันครบกำหนดใหม่",widget=forms.DateInput(attrs={"type":"date"}))
     reason=forms.CharField(label="เหตุผลที่แก้ไข",max_length=300)
+
+class ReceiptFilterForm(forms.Form):
+    customer=forms.ModelChoiceField(label='ลูกค้า',queryset=Customer.objects.all(),required=False)
+    start=forms.DateField(label='ตั้งแต่วันที่',required=False,widget=forms.DateInput(attrs={'type':'date'}))
+    end=forms.DateField(label='ถึงวันที่',required=False,widget=forms.DateInput(attrs={'type':'date'}))
+    q=forms.CharField(label='เลขใบเสร็จ / เลขบิล / ชื่อลูกค้า',required=False,max_length=160)
+    def clean(self):
+        data=super().clean()
+        if data.get('start') and data.get('end') and data['start']>data['end']:
+            raise forms.ValidationError('วันที่เริ่มต้องไม่เกินวันที่สิ้นสุด')
+        return data
+
+class BundleForm(forms.Form):
+    key=forms.UUIDField(widget=forms.HiddenInput)
+    payments=forms.ModelMultipleChoiceField(label='ใบเสร็จ',queryset=Payment.objects.filter(voided=False,bill__status='open'),widget=forms.CheckboxSelectMultiple)
+
+class MoneyReportForm(forms.Form):
+    start=forms.DateField(label='ตั้งแต่วันที่',widget=forms.DateInput(attrs={'type':'date'}))
+    end=forms.DateField(label='ถึงวันที่',widget=forms.DateInput(attrs={'type':'date'}))
+    def clean(self):
+        data=super().clean();start=data.get('start');end=data.get('end')
+        if start and end and (end<start or (end-start).days>365):
+            raise forms.ValidationError('เลือกช่วงวันที่ไม่เกิน 366 วัน และวันสิ้นสุดต้องไม่ก่อนวันเริ่ม')
+        return data

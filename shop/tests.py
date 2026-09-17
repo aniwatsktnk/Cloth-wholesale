@@ -198,3 +198,70 @@ class ExpansionTests(TestCase):
     def test_form_rejects_non_https_image(self):
         data={k:getattr(self.p,k) for k in ProductForm.Meta.fields};data['image_url']='http://example.com/image.jpg'
         self.assertFalse(ProductForm(data,instance=self.p).is_valid())
+
+from .models import ReceiptBundle
+from .services import combine_receipts
+class ReceiptBundleTests(TestCase):
+    setUp=SalesTests.setUp
+    sale=SalesTests.sale
+    def payments(self):
+        bill=self.sale(items=[(self.p.pk,2)],paid=100)
+        second=receive(user=self.user,bill_id=bill.pk,key=uuid.uuid4(),value=50,method='transfer',reference='test')
+        return bill,[bill.payments.first().pk,second.pk]
+    def test_combination_is_snapshot_without_new_money_or_stock(self):
+        bill,ids=self.payments();stock=Product.objects.get(pk=self.p.pk).stock
+        bundle=combine_receipts(user=self.user,key=uuid.uuid4(),payment_ids=ids)
+        self.assertEqual(bundle.total,150);self.assertEqual(Payment.objects.count(),2)
+        self.assertEqual(len(bundle.snapshot['bills']),1)
+        self.assertEqual(bundle.snapshot['bills'][0]['lines'][0]['quantity'],2)
+        self.assertEqual(bill.balance,150);self.assertEqual(Product.objects.get(pk=self.p.pk).stock,stock)
+        self.assertFalse(bundle.invalid)
+    def test_retry_and_duplicate_selection(self):
+        bill,ids=self.payments();key=uuid.uuid4()
+        one=combine_receipts(user=self.user,key=key,payment_ids=ids+[ids[0]])
+        self.assertEqual(combine_receipts(user=self.user,key=key,payment_ids=ids).pk,one.pk)
+        self.assertEqual(one.payments.count(),2);self.assertEqual(ReceiptBundle.objects.count(),1)
+    def test_mixed_customers_and_walk_in_rejected(self):
+        bill,ids=self.payments()
+        other=self.sale(customer=Customer.objects.create(name='อื่น'),paid=150)
+        with self.assertRaises(ValidationError): combine_receipts(user=self.user,key=uuid.uuid4(),payment_ids=[ids[0],other.payments.first().pk])
+        a=self.sale(customer=None,paid=150);b=self.sale(customer=None,paid=150)
+        with self.assertRaises(ValidationError): combine_receipts(user=self.user,key=uuid.uuid4(),payment_ids=[a.payments.first().pk,b.payments.first().pk])
+    def test_multiple_bills_and_changed_identity(self):
+        bill,ids=self.payments();other=self.sale(paid=150)
+        bundle=combine_receipts(user=self.user,key=uuid.uuid4(),payment_ids=[ids[0],other.payments.first().pk])
+        self.assertEqual(bundle.total,250);self.assertEqual(len(bundle.snapshot['bills']),2)
+        Bill.objects.filter(pk=other.pk).update(buyer={'name':'เปลี่ยนชื่อ'})
+        with self.assertRaises(ValidationError): combine_receipts(user=self.user,key=uuid.uuid4(),payment_ids=[ids[0],other.payments.first().pk])
+        self.assertEqual(bundle.snapshot['buyer']['name'],'ลูกค้าทดสอบ')
+    def test_void_source_invalidates_summary_and_remains_visible_in_print(self):
+        bill,ids=self.payments();bundle=combine_receipts(user=self.user,key=uuid.uuid4(),payment_ids=ids)
+        void_payment(user=self.user,payment_id=ids[0],reason='รับคืนแล้ว')
+        self.assertTrue(bundle.invalid)
+        with self.assertRaises(ValidationError): combine_receipts(user=self.user,key=uuid.uuid4(),payment_ids=ids)
+        self.client.force_login(self.user)
+        response=self.client.get(f'/receipt-bundles/{bundle.pk}/?paper=80')
+        self.assertContains(response,'document-invalid');self.assertEqual(bundle.total,150)
+    def test_invalid_selection(self):
+        bill,ids=self.payments()
+        for values in [[ids[0]],[ids[0],ids[0]],ids+[99999],list(range(101))]:
+            with self.assertRaises(ValidationError): combine_receipts(user=self.user,key=uuid.uuid4(),payment_ids=values)
+    def test_permissions_cancel_and_money_report(self):
+        bill,ids=self.payments();self.client.force_login(self.user)
+        self.assertEqual(self.client.post('/receipts/',{'key':str(uuid.uuid4()),'payments':ids}).status_code,403)
+        self.user.user_permissions.add(*Permission.objects.filter(codename__in=['add_receiptbundle','change_receiptbundle'],content_type__app_label='shop'))
+        response=self.client.post('/receipts/',{'key':str(uuid.uuid4()),'payments':ids})
+        self.assertEqual(response.status_code,302);bundle=ReceiptBundle.objects.get()
+        report=self.client.get('/reports/money/');self.assertEqual(report.context['total'],150)
+        self.assertEqual(self.client.post(f'/receipt-bundles/{bundle.pk}/cancel/',{'reason':'พิมพ์ผิด'}).status_code,302)
+        bundle.refresh_from_db();self.assertTrue(bundle.cancelled)
+        self.assertEqual(self.client.get('/reports/money/').context['total'],150)
+        void_payment(user=self.user,payment_id=ids[0],reason='คืนเงิน')
+        self.assertEqual(self.client.get('/reports/money/').context['total'],50)
+    def test_filters_and_invalid_dates(self):
+        bill,ids=self.payments();self.client.force_login(self.user)
+        response=self.client.get('/receipts/',{'q':f'SO-{bill.pk:08d}','customer':self.customer.pk})
+        self.assertEqual(response.context['page'].paginator.count,2)
+        self.assertContains(self.client.get('/receipts/?start=invalid'),'errorlist')
+        response=self.client.get('/reports/money/?start=2026-09-30&end=2026-09-01')
+        self.assertEqual(response.context['total'],0);self.assertContains(response,'errorlist')
