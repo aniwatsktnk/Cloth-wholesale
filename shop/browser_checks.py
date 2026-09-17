@@ -3,7 +3,7 @@ from django.contrib.staticfiles.testing import StaticLiveServerTestCase
 from django.test import override_settings
 from django.contrib.auth import get_user_model
 from playwright.sync_api import sync_playwright
-from .models import Product, Customer, PriceTier, CustomerPrice, ShopSettings
+from .models import Product, Customer, PriceTier, CustomerPrice, ShopSettings, Bill
 
 
 @override_settings(STORAGES={"default":{"BACKEND":"django.core.files.storage.FileSystemStorage"},"staticfiles":{"BACKEND":"django.contrib.staticfiles.storage.StaticFilesStorage"}})
@@ -40,8 +40,23 @@ class WholesaleBrowserChecks(StaticLiveServerTestCase):
             page.locator('#submit-sale').click()
             page.wait_for_url('**/sales/*/')
             self.assertIn('880.00',page.locator('main').inner_text())
+            page.locator('#id_value').fill('100')
+            page.locator('button').filter(has_text='รับเงินและออกใบเสร็จ').click()
+            page.wait_for_url('**/receipts/*/')
+            page.goto(self.live_server_url+'/receipts/')
+            page.locator('input[name="payments"]').nth(0).check()
+            page.locator('input[name="payments"]').nth(1).check()
+            page.get_by_role('button',name='สร้างใบสรุปรวมใบเสร็จ').click()
+            page.wait_for_url('**/receipt-bundles/*/')
+            self.assertIn('300.00',page.locator('article').inner_text())
+            self.assertEqual(page.locator('article h3').count(),1)
+            page.emulate_media(media='print')
+            self.assertTrue(page.locator('article h1').is_visible())
+            page.emulate_media(media='screen')
+            page.goto(self.live_server_url+'/reports/money/')
+            self.assertIn('300.00',page.locator('main').inner_text())
             page.goto(self.live_server_url+'/receivables/')
-            self.assertIn('880.00',page.locator('main').inner_text())
+            self.assertIn('780.00',page.locator('main').inner_text())
             page.goto(self.live_server_url+f'/products/{products[0].pk}/prices/')
             page.locator('.add-price[data-prefix="tiers"]').click()
             self.assertEqual(page.locator('#id_tiers-TOTAL_FORMS').input_value(),'3')

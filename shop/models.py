@@ -107,3 +107,18 @@ class AuditEvent(models.Model):
     object_id=models.PositiveBigIntegerField()
     changes=models.JSONField(default=dict)
     class Meta: ordering=["-created","-pk"]
+
+class ReceiptBundle(models.Model):
+    request_key=models.UUIDField(default=uuid.uuid4,unique=True,editable=False)
+    created=models.DateTimeField(auto_now_add=True)
+    creator=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.PROTECT)
+    customer=models.ForeignKey(Customer,on_delete=models.PROTECT)
+    payments=models.ManyToManyField(Payment,related_name='bundles')
+    snapshot=models.JSONField(default=dict)
+    total=models.DecimalField(max_digits=16,decimal_places=2)
+    cancelled=models.BooleanField(default=False)
+    cancel_reason=models.CharField(max_length=500,blank=True)
+    @property
+    def number(self): return f'RS-{self.pk:08d}'
+    @property
+    def invalid(self): return self.cancelled or self.payments.filter(voided=True).exists()

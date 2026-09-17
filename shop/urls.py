@@ -1,6 +1,10 @@
 from django.urls import path
 from . import views as v
 urlpatterns=[
+ path("receipts/",v.receipt_list,name="receipt_list"),
+ path("receipt-bundles/<int:pk>/",v.receipt_bundle,name="receipt_bundle"),
+ path("receipt-bundles/<int:pk>/cancel/",v.cancel_bundle,name="cancel_bundle"),
+ path("reports/money/",v.money_report,name="money_report"),
  path("products/<int:pk>/edit/",v.product_edit,name="product_edit"),
  path("products/<int:pk>/prices/",v.product_prices,name="product_prices"),
  path("customers/<int:pk>/edit/",v.customer_edit,name="customer_edit"),
